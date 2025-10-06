@@ -57,7 +57,7 @@ function Remove-OldPowerShellModules {
 
             if (-not($SimulationMode)) {
                 Remove-Module $ModuleName -ErrorAction SilentlyContinue
-                Uninstall-Module $oldVersion -Force  -ErrorAction Stop
+                Uninstall-Module $oldVersion -Force -ErrorAction Stop
             }
         }
     }
@@ -105,11 +105,11 @@ foreach ($module in $modules.Name) {
 	
     # $current version can also be a version follow by -preview
     if ($currentVersion -like '*-preview') {
-        Write-Warning "The module installed is a preview version, it will not tested by this script"
+        Write-Warning 'The module installed is a preview version, it will not tested by this script'
     }
 
     if ($moduleGalleryInfo.Version -like '*-preview') {
-        Write-Warning "The module in PowerShell Gallery is a preview version, it will not tested bt this script"
+        Write-Warning 'The module in PowerShell Gallery is a preview version, it will not tested bt this script'
         continue
     }
     else {
@@ -118,7 +118,7 @@ foreach ($module in $modules.Name) {
 
     # Convert published date to YYYY/MM/DD HH:MM:SS format
     $publishedDate = [datetime]$moduleGalleryInfo.PublishedDate
-    $publishedDate = $publishedDate.ToString("yyyy/MM/dd HH:mm:ss")
+    $publishedDate = $publishedDate.ToString('yyyy/MM/dd HH:mm:ss')
 
     if ($null -eq $currentVersion) {
         Write-Host -ForegroundColor Cyan "$module - Install from PowerShellGallery version $($moduleGalleryInfo.Version) - Release date: $publishedDate"
@@ -135,7 +135,7 @@ foreach ($module in $modules.Name) {
     elseif ($moduleGalleryInfo.Version -eq $currentVersion) {
         Write-Host -ForegroundColor Green "$module - already in latest version: " -NoNewline
         Write-Host -ForegroundColor White "$currentVersion" -NoNewline 
-        Write-Host -ForegroundColor Green " - Release date:" -NoNewline
+        Write-Host -ForegroundColor Green ' - Release date:' -NoNewline
         Write-Host -ForegroundColor White " $publishedDate"
     }
     elseif ($currentVersion.count -gt 1) {
@@ -152,7 +152,7 @@ foreach ($module in $modules.Name) {
         if ($moduleGalleryVersion -ne $currentVersion) {
             Write-Host -ForegroundColor Cyan "$module - Install from PowerShellGallery version" -NoNewline
             Write-Host -ForegroundColor White " $($moduleGalleryInfo.Version)" -NoNewline
-            Write-Host -ForegroundColor Cyan " - Release date:" -NoNewline
+            Write-Host -ForegroundColor Cyan ' - Release date:' -NoNewline
             Write-Host -ForegroundColor White " $publishedDate"
 
             if (-not($SimulationMode)) {
@@ -174,7 +174,7 @@ foreach ($module in $modules.Name) {
     elseif ([version]$currentVersion -lt [version]$moduleGalleryVersion) {
         Write-Host -ForegroundColor Cyan "$module - Update from PowerShellGallery version" -NoNewline
         Write-Host -ForegroundColor White " $currentVersion -> $($moduleGalleryInfo.Version)" -NoNewline 
-        Write-Host -ForegroundColor Cyan " - Release date:" -NoNewline
+        Write-Host -ForegroundColor Cyan ' - Release date:' -NoNewline
         Write-Host -ForegroundColor White " $publishedDate"
         
         if (-not($SimulationMode)) {
