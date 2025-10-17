@@ -149,11 +149,11 @@ foreach ($module in $modules) {
         if (-not($SimulationMode)) {
             try {
                 if ($module.InstalledLocation -like "$env:programfiles\*") {
-                    Install-PSResource -Name $moduleName -Force -SkipPublisherCheck -ErrorAction Stop
+                    Install-PSResource -Name $moduleName -Force -ErrorAction Stop
                 }
                 else {
                     Write-Host -ForegroundColor Cyan "Install $moduleName in CurrentUser scope because the module is installed in $($module.InstalledLocation)"
-                    Install-PSResource -Name $moduleName -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction Stop
+                    Install-PSResource -Name $moduleName -Scope CurrentUser -Force -ErrorAction Stop
                 }
             }
             catch {
@@ -251,7 +251,14 @@ foreach ($module in $modules) {
     }
 }
 
-$scripts = Get-PSResource | Where-Object Type -EQ Script
+if ($IncludedModules) {
+    Write-Host -ForegroundColor Cyan "Get PowerShell script modules like $IncludedModules"
+    $scripts = Get-PSResource | Where-Object { $_.Name -like $IncludedModules -and $_.Type -eq 'Script' }
+}
+else {
+    Write-Host -ForegroundColor Cyan 'Get all PowerShell script modules'
+    $scripts = Get-PSResource | Where-Object Type -EQ 'Script'
+}
 
 foreach ($script in $scripts) {
     try {
