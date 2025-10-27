@@ -275,11 +275,11 @@ foreach ($script in $scripts) {
     elseif ([version]$scriptCurrentVersion.Version -ne [version]$script.Version) {
         if ($script.InstalledLocation -like "$env:programfiles\*") {
             Write-Host -ForegroundColor Cyan "(script) $($script.Name) - Update from PowerShellGallery version with AllUsers scope" -NoNewline
-            Update-PSResource -Name $script.Name -Force -SkipPublisherCheck
+            Update-PSResource -Name $script.Name -Force
         }
         else {
             Write-Host -ForegroundColor Cyan "(script) $($script.Name) - Update from PowerShellGallery version with CurrentUser scope" -NoNewline
-            Update-PSResource -Name $script.Name -Scope CurrentUser -Force -SkipPublisherCheck
+            Update-PSResource -Name $script.Name -Scope CurrentUser -Force
         }
     }
     else {
