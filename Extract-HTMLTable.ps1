@@ -2,7 +2,7 @@ function Extract-HTMLTable {
     param(
         [Parameter(Mandatory)]
         [String] $URL,
-  
+
         [Parameter(Mandatory = $false)]
         [int] $TableNumber,
 
@@ -27,7 +27,7 @@ function Extract-HTMLTable {
         $tables = @($html.getElementsByTagName('TABLE'))
     }
     else {
-        $WebRequest = Invoke-WebRequest $URL
+        $WebRequest = Invoke-WebRequest $URL -UseBasicParsing
 
         # Cast in array in case of only one element
         $tables = @($WebRequest.ParsedHtml.getElementsByTagName('TABLE'))
@@ -50,7 +50,7 @@ function Extract-HTMLTable {
 
         foreach ($row in $rows) {
             $cells = @($row.Cells)
-   
+
             ## If we've found a table header, remember its titles
             if ($cells[0].tagName -eq 'TH') {
                 $titles = @($cells | ForEach-Object { ('' + $_.InnerText).Trim() })
