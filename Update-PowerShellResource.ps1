@@ -257,7 +257,7 @@ if ($IncludedModules) {
 }
 else {
     Write-Host -ForegroundColor Cyan 'Get all PowerShell script modules'
-    $scripts = Get-PSResource | Where-Object Type -EQ 'Script'
+    $scripts = Get-PSResource | Where-Object Type -eq 'Script'
 }
 
 foreach ($script in $scripts) {
