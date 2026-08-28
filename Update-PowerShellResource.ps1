@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param (
     [Parameter()]
     # To exclude modules from the update process
@@ -6,7 +6,12 @@ param (
     # To include only these modules for the update process
     [String[]]$IncludedModules,
     [switch]$SkipPublisherCheck,
-    [switch]$SimulationMode
+    [switch]$SimulationMode,
+    # Number of concurrent PowerShell Gallery lookups. Only the lookups are parallelized:
+    # install / update / uninstall stay sequential because PSResourceGet is not thread-safe.
+    # Set to 1 to disable parallelism.
+    [ValidateRange(1, 20)]
+    [int]$ThrottleLimit = 5
 )
 <#
 /!\/!\/!\ PLEASE READ /!\/!\/!\
@@ -28,7 +33,7 @@ If you have a module with two or more versions, the script delete them and reins
 
 #>
 
-#Requires -Version 5.0
+#Requires -Version 7.0
 
 Write-Host -ForegroundColor cyan 'Define PowerShell to add TLS1.2 in this session, needed since 1st April 2020 (https://devblogs.microsoft.com/powershell/powershell-gallery-tls-support/)'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -40,6 +45,97 @@ Write-Host -ForegroundColor cyan 'Define PowerShell to add TLS1.2 in this sessio
 
 if ($SimulationMode) {
     Write-Host -ForegroundColor yellow 'Simulation mode is ON, nothing will be installed / removed / updated'
+}
+
+# Uninstall-PSResource failed with 'Access to the path is denied' on redirected folders (OneDrive)
+# until this fix: https://github.com/PowerShell/PSResourceGet/pull/1860 (milestone 1.2.0-preview4).
+$requiredPSResourceGetVersion = [version]'1.2.0'
+
+# The already imported module wins, otherwise take the highest one available.
+$psResourceGetModule = Get-Module -Name 'Microsoft.PowerShell.PSResourceGet'
+
+if ($null -eq $psResourceGetModule) {
+    $psResourceGetModule = Get-Module -Name 'Microsoft.PowerShell.PSResourceGet' -ListAvailable | Sort-Object -Property Version -Descending | Select-Object -First 1
+}
+
+if ($null -eq $psResourceGetModule) {
+    throw 'Microsoft.PowerShell.PSResourceGet is not installed. Run `Install-Module -Name Microsoft.PowerShell.PSResourceGet -Force` and start this script again.'
+}
+
+$psResourceGetVersion = [version]$psResourceGetModule.Version
+$psResourceGetIsSupported = $psResourceGetVersion -ge $requiredPSResourceGetVersion
+
+if ($psResourceGetIsSupported) {
+    Write-Host -ForegroundColor Green "Microsoft.PowerShell.PSResourceGet $psResourceGetVersion detected"
+}
+else {
+    Write-Error "Microsoft.PowerShell.PSResourceGet $psResourceGetVersion is too old: version $requiredPSResourceGetVersion or later is required, otherwise ``Uninstall-PSResource`` fails with 'Access to the path is denied' on redirected folders (OneDrive). Run ``Update-PSResource -Name Microsoft.PowerShell.PSResourceGet -Force`` to fix it. The script keeps going and falls back to ``Remove-Item -Recurse -Force`` when needed. See https://github.com/PowerShell/PSResourceGet/issues/1793"
+}
+
+function Get-ExclusionMatch {
+    <#
+        Returns the first exclusion pattern matching the resource name, or $null.
+        Patterns must be evaluated one at a time: "$Pattern" would join the array with $OFS
+        and build a wildcard matching nothing, e.g. 'Az.* Microsoft.Graph.*'.
+    #>
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [AllowNull()]
+        [string[]]$Pattern
+    )
+
+    # -eq first: it also covers names holding wildcard characters ([ ] * ?) that -like would interpret.
+    return $Pattern | Where-Object { $Name -eq $_ -or $Name -like $_ } | Select-Object -First 1
+}
+
+function Resolve-GalleryResource {
+    <#
+        Queries the PowerShell Gallery for every requested name, in parallel, and returns a
+        hashtable keyed by resource name. Each value holds the gallery object or the error
+        message, so the sequential loops below can consume it without any network call.
+    #>
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string[]]$Name,
+        [Parameter(Mandatory = $true)]
+        [int]$ThrottleLimit
+    )
+
+    $cache = @{}
+
+    # `@($resources.Name)` yields a single empty string when no resource was found, so drop the blanks.
+    $uniqueNames = @($Name | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+
+    if ($uniqueNames.Count -eq 0) {
+        Write-Host -ForegroundColor Yellow 'No resource to look up in the PowerShell Gallery'
+        return $cache
+    }
+
+    Write-Host -ForegroundColor Cyan "Query the PowerShell Gallery for $($uniqueNames.Count) resource(s) with a throttle limit of $ThrottleLimit"
+
+    $lookups = $uniqueNames | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
+        try {
+            # Select-Object -First 1: a resource registered in several repositories returns
+            # more than one object, which breaks the [version] casts done by the callers.
+            $found = Find-PSResource -Name $_ -ErrorAction Stop | Select-Object -First 1
+            [PSCustomObject]@{ Name = $_; Info = $found; Error = $null }
+        }
+        catch {
+            [PSCustomObject]@{ Name = $_; Info = $null; Error = $_.Exception.Message }
+        }
+    }
+
+    foreach ($lookup in $lookups) {
+        $cache[$lookup.Name] = $lookup
+    }
+
+    return $cache
 }
 
 function Remove-LegacyPSResource {
@@ -56,17 +152,28 @@ function Remove-LegacyPSResource {
         foreach ($oldVersion in $oldVersions) {
             Write-Host -ForegroundColor Cyan "$($Resource.Name) - Uninstall previous version" -NoNewline
             Write-Host -ForegroundColor White " ($($oldVersion.Version))"
-            # https://github.com/PowerShell/PSResourceGet/issues/1793
-            # Uinstall-PSResource on OneDrive Error: Access to the path is denied
             if (-not($SimulationMode)) {
-                if ($Resource.InstalledLocation -like "$env:programfiles\*") {
-                    Uninstall-PSResource -Name $($Resource.Name) -Version $oldVersion.Version -ErrorAction Stop
+                try {
+                    if ($Resource.InstalledLocation -like "$env:programfiles\*") {
+                        Uninstall-PSResource -Name $($Resource.Name) -Version $oldVersion.Version -ErrorAction Stop
+                    }
+                    else {
+                        # module installed in current user location
+                        Uninstall-PSResource -Name $($Resource.Name) -Version $oldVersion.Version -Scope CurrentUser -ErrorAction Stop
+                    }
                 }
-                elseif ($Resource.InstalledLocation -like "$env:OneDrive\*") {
-                    # module installed in OneDrive location
-                    $installedLocation = "$($oldVersion.InstalledLocation)\$($Resource.Name)\$($oldVersion.Version)"
-                    
-                    Write-Host -ForegroundColor Magenta '`Uninstall-PSResource` is not working properly in OneDrive, so the script will use `Remove-Item -Recurse -Force` instead. See https://github.com/PowerShell/PSResourceGet/issues/1793 for more details.'
+                catch {
+                    $installedLocation = Join-Path -Path $oldVersion.InstalledLocation -ChildPath "$($Resource.Name)\$($oldVersion.Version)"
+
+                    if ($psResourceGetIsSupported) {
+                        # Not the known OneDrive bug: surface it instead of hiding it behind the fallback.
+                        Write-Warning "$($Resource.Name) - ``Uninstall-PSResource`` failed on PSResourceGet $psResourceGetVersion, which is not the expected behaviour: $($_.Exception.Message)"
+                    }
+                    else {
+                        Write-Host -ForegroundColor Magenta "$($Resource.Name) - ``Uninstall-PSResource`` failed as expected on PSResourceGet $psResourceGetVersion (< $requiredPSResourceGetVersion): $($_.Exception.Message)"
+                    }
+
+                    Write-Host -ForegroundColor Magenta "$($Resource.Name) - falling back to ``Remove-Item -Recurse -Force``"
 
                     if (Test-Path -Path $installedLocation) {
                         Write-Host -ForegroundColor Cyan "$($Resource.Name) - Remove the folder $installedLocation"
@@ -75,10 +182,6 @@ function Remove-LegacyPSResource {
                     else {
                         Write-Warning "$($Resource.Name) - The folder $installedLocation does not exist, so cannot be removed"
                     }
-                }
-                else {
-                    # module installed in current user location
-                    Uninstall-PSResource -Name $($Resource.Name) -Version $oldVersion.Version -Scope CurrentUser -ErrorAction Stop
                 }
             }
         }
@@ -97,16 +200,24 @@ else {
     $modules = Get-PSResource | Where-Object { $_.Type -ne 'Script' }
 }
 
+if ($ExcludedModules) {
+    # Filter before the gallery lookup, otherwise excluded modules still cost a network call.
+    $modules = $modules | Where-Object {
+        $matchedPattern = Get-ExclusionMatch -Name $_.Name -Pattern $ExcludedModules
+
+        if ($matchedPattern) {
+            Write-Host -ForegroundColor Yellow "Module $($_.Name) is excluded from the update process (match '$matchedPattern')"
+            return $false
+        }
+
+        return $true
+    }
+}
+
+$moduleGalleryCache = Resolve-GalleryResource -Name @($modules.Name) -ThrottleLimit $ThrottleLimit
+
 foreach ($module in $modules) {
     $moduleName = $module.Name
-    if ($ExcludedModules -contains $moduleName) {
-        Write-Host -ForegroundColor Yellow "Module $moduleName is excluded from the update process"
-        continue
-    }
-    elseif ($moduleName -like "$excludedModules") {
-        Write-Host -ForegroundColor Yellow "Module $moduleName is excluded from the update process (match $excludeModules)"
-        continue
-    }
 
     $currentVersion = $null
 	
@@ -118,13 +229,14 @@ foreach ($module in $modules) {
         continue
     }
 	
-    try {
-        $moduleGalleryInfo = Find-PSResource -Name $moduleName -ErrorAction Stop
-    }
-    catch {
-        Write-Warning "$moduleName not found in the PowerShell Gallery. $($_.Exception.Message)"
+    $moduleLookup = $moduleGalleryCache[$moduleName]
+
+    if ($null -eq $moduleLookup -or $null -eq $moduleLookup.Info) {
+        Write-Warning "$moduleName not found in the PowerShell Gallery. $($moduleLookup.Error)"
         continue
     }
+
+    $moduleGalleryInfo = $moduleLookup.Info
 	
     # $current version can also be a version follow by -preview
     if ($currentVersion -like '*-preview') {
@@ -260,13 +372,17 @@ else {
     $scripts = Get-PSResource | Where-Object Type -eq 'Script'
 }
 
+$scriptGalleryCache = Resolve-GalleryResource -Name @($scripts.Name) -ThrottleLimit $ThrottleLimit
+
 foreach ($script in $scripts) {
-    try {
-        $scriptCurrentVersion = Find-PSResource -Name $script.Name -ErrorAction Stop
+    $scriptLookup = $scriptGalleryCache[$script.Name]
+
+    if ($null -eq $scriptLookup -or $null -eq $scriptLookup.Info) {
+        Write-Warning "$($script.Name) is not available in the PowerShell Gallery, so it is excluded from the update process"
+        continue
     }
-    catch {
-        Write-Warning "$($script.Name) is a script module, so it is excluded from the update process"
-    }
+
+    $scriptCurrentVersion = $scriptLookup.Info
 
     if ($scriptCurrentVersion.Version -like '*-preview') {
         Write-Warning 'The script module in PowerShell Gallery is a preview version, it will not tested bt this script'
